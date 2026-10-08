@@ -43,41 +43,55 @@ PORT to arduino-esp32 Core 3.3.x (IDF 5.x)
  */
 
 #include <stdio.h>
+#include <Wire.h>
 #include <driver/mcpwm_prelude.h>
+#include <U8g2lib.h>
 
 //------------------------------------------------------------------------------
 // set to TRUE to get debug output on USB serial port
-#define CFG_DBG     TRUE
+#define CFG_DBG        TRUE
 
 // define the PIN number you want to use
-#define GPIO_INP1   36
-#define GPIO_INP2   39
+#define GPIO_INP1      36
+#define GPIO_INP2      39
 
-#define PIN_ADC1    34
-#define PIN_ADC2    35
+#define PIN_ADC1       34
+#define PIN_ADC2       35
 
-#define PWMI1_PIN   22
+#define PWMI1_PIN      22
 
-#define GPIO_OUT1   14
-#define GPIO_OUT2   27
+#define GPIO_OUT1      14
+#define GPIO_OUT2      27
 
-#define PIN_DAC1    25
-#define PIN_DAC2    26
+#define PIN_DAC1       25
+#define PIN_DAC2       26
 
-#define PWMO1_PIN   16
-#define PWMO1_FRQ   5000
-#define PWMO1_RSL   12
+#define PWMO1_PIN      16
+#define PWMO1_FRQ      5000
+#define PWMO1_RSL      12
 
-#define PIN_SRL_RX   23
-#define PIN_SRL_TX   24
+#define PIN_SRL_RX     23
+#define PIN_SRL_TX     24
 
-#define SZ_RX_BUFFER 100
-#define BAUD_RATE    115200
+#define SZ_RX_BUFFER   100
+#define BAUD_RATE      115200
 
+// OLED display (SH1106 128x64, I2C)
+#define PIN_OLED_SDA   21
+#define PIN_OLED_SCL   19
+#define OLED_UPDATE_MS 200
 //------------------------------------------------------------------------------
-HardwareSerial* pSrl    = &Serial2;
-static bool pwmOutReady = false;
-static bool pwmInReady  = false;
+HardwareSerial* pSrl       = &Serial2;
+static bool pwmOutReady    = false;
+static bool pwmInReady     = false;
+// tracked output values (not readable back from hardware)
+static int      dacVals[2] = {0, 0};
+static uint32_t pwmOutFreq = PWMO1_FRQ;
+static uint32_t pwmOutDuty = 0;
+// OLED
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
+//------------------------------------------------------------------------------
+// command buffer
 //------------------------------------------------------------------------------
 /*
     A class for handling a circular buffer
@@ -119,7 +133,7 @@ private:
   int rdIdx, wrIdx;
   uint8_t buffer[sz];
 };
-
+//------------------------------------------------------------------------------
 // struct for pwm input handling
 typedef struct {
   volatile uint32_t captureValue[2];
@@ -130,7 +144,7 @@ typedef struct {
   volatile bool hasRisingCapture;
   volatile bool hasPeriod;        // period valid (2nd rising edge seen)
 } typePwm;
-
+//------------------------------------------------------------------------------
 // structure that holds module wide variables
 typedef struct sLocals {
   volatile typePwm pwmIn;
@@ -141,6 +155,7 @@ typedef struct sLocals {
 typeLocals lcls = {};
 //------------------------------------------------------------------------------
 // digital input handling
+//------------------------------------------------------------------------------
 void initDigitalIn() {
 #ifdef GPIO_INP1
   pinMode(GPIO_INP1, INPUT);
@@ -149,7 +164,7 @@ void initDigitalIn() {
   pinMode(GPIO_INP2, INPUT);
 #endif
 }
-
+//------------------------------------------------------------------------------
 bool getDigitalInput(int nr) {
   switch (nr) {
 #ifdef GPIO_INP1
@@ -169,6 +184,7 @@ bool getDigitalInput(int nr) {
 }
 //------------------------------------------------------------------------------
 // digital output handling
+//------------------------------------------------------------------------------
 void initDigitalOut() {
 #ifdef GPIO_OUT1
   pinMode(GPIO_OUT1, OUTPUT);
@@ -177,7 +193,7 @@ void initDigitalOut() {
   pinMode(GPIO_OUT2, OUTPUT);
 #endif
 }
-
+//------------------------------------------------------------------------------
 void setDigitalOutput(int nr, int val) {
   val = val != 0 ? HIGH : LOW;
   switch (nr) {
@@ -197,6 +213,7 @@ void setDigitalOutput(int nr, int val) {
 }
 //------------------------------------------------------------------------------
 // digital to analog conversion (DAC) handling
+//------------------------------------------------------------------------------
 void initDac() {
 #ifdef PIN_DAC1
   setDac(0, 0);
@@ -205,12 +222,15 @@ void initDac() {
   setDac(1, 0);
 #endif
 }
-
+//------------------------------------------------------------------------------
 void setDac(int nr, int val) {
   if (val > 255) {
     val = 255;
   } else if (val < 0) {
     val = 0;
+  }
+  if (nr >= 0 && nr < 2) {
+    dacVals[nr] = val;
   }
   switch (nr) {
 #ifdef PIN_DAC1
@@ -229,9 +249,10 @@ void setDac(int nr, int val) {
 }
 //------------------------------------------------------------------------------
 // analog to digital conversion (ADC) handling
+//------------------------------------------------------------------------------
 void initAdc() {
 }
-
+//------------------------------------------------------------------------------
 int getAdc(int nr) {
   switch (nr) {
 #ifdef PIN_ADC1
@@ -251,6 +272,7 @@ int getAdc(int nr) {
 }
 //------------------------------------------------------------------------------
 // pulse wide modulation (PWM) output handling – Core 3.x uses pin-based LEDC API
+//------------------------------------------------------------------------------
 void initPwmOut() {
 #ifdef PWMO1_PIN
   pwmOutReady = ledcAttach(PWMO1_PIN, PWMO1_FRQ, PWMO1_RSL);
@@ -265,11 +287,13 @@ void setPwm(int nr, int val) {
 #endif
 }
 //------------------------------------------------------------------------------
+// PWM input
+//------------------------------------------------------------------------------
 // pulse wide modulation input handling – modern capture API (Core 3.x)
 static mcpwm_cap_timer_handle_t   pwmInCapTimer   = nullptr;
 static mcpwm_cap_channel_handle_t pwmInCapPosEdge = nullptr;
 static mcpwm_cap_channel_handle_t pwmInCapNegEdge = nullptr;
-
+//------------------------------------------------------------------------------
 // ISR callback for both capture channels, edge selected via edata->cap_edge
 static bool IRAM_ATTR pwm_capture_cb(
     mcpwm_cap_channel_handle_t cap_channel,
@@ -295,7 +319,7 @@ static bool IRAM_ATTR pwm_capture_cb(
   }
   return false;  // no task switch needed
 }
-
+//------------------------------------------------------------------------------
 void initPwmIn() {
   // modern capture API:
   //   1 capture timer + 2 capture channels on the same pin:
@@ -314,7 +338,6 @@ void initPwmIn() {
     pwmInCapTimer = nullptr;
     return;
   }
-
   mcpwm_capture_channel_config_t posCfg = {};
   posCfg.intr_priority = 0;   // 0: driver allocates a low priority (1..3)
   posCfg.prescale      = 1;   // no prescale division
@@ -325,7 +348,6 @@ void initPwmIn() {
   posCfg.flags.invert_cap_signal = false;
   posCfg.flags.io_loop_back     = false;
   posCfg.gpio_num = PWMI1_PIN;
-
   mcpwm_capture_event_callbacks_t posCbs = {};
   posCbs.on_cap = pwm_capture_cb;
 
@@ -385,11 +407,11 @@ void initPwmIn() {
   }
   pwmInReady = true;
 }
-
+//------------------------------------------------------------------------------
 bool getPwmReady() {
   return pwmInReady;
 }
-
+//------------------------------------------------------------------------------
 void getPwm(int nr, uint32_t& freq, uint32_t& duty) {
   (void)nr;  // single input channel
   freq = 0;
@@ -451,6 +473,92 @@ void getPwm(int nr, uint32_t& freq, uint32_t& duty) {
   freq = (1000000ULL + periodTicks / 2) / periodTicks;
 }
 //------------------------------------------------------------------------------
+// OLED display
+//------------------------------------------------------------------------------
+static bool displayReady = false;
+
+void initDisplay() {
+  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+  Wire.setClock(400000);
+  Wire.setTimeOut(50);
+  // I2C bus scan for debugging
+  pSrl->printf("I2C scan (SDA=%d, SCL=%d):\n", PIN_OLED_SDA, PIN_OLED_SCL);
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      pSrl->printf("  found device at 0x%02X\n", addr);
+      found++;
+    }
+  }
+  if (found == 0) {
+    pSrl->println("  no I2C devices found!");
+    displayReady = false;
+    return;
+  }
+  // try common SH1106 addresses
+  uint8_t oledAddr = 0;
+  for (uint8_t a = 0x3C; a <= 0x3D; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      oledAddr = a;
+      break;
+    }
+  }
+  if (!oledAddr) {
+    pSrl->println("  OLED not found at 0x3C/0x3D!");
+    displayReady = false;
+    return;
+  }
+  pSrl->printf("  OLED at 0x%02X\n", oledAddr);
+  u8g2.setI2CAddress(oledAddr << 1);
+  u8g2.begin();
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 24, "Esp32DutInjector");
+  u8g2.drawStr(0, 40, "init...");
+  u8g2.sendBuffer();
+  displayReady = true;
+  pSrl->println("  display init OK");
+}
+//------------------------------------------------------------------------------
+void updateDisplay() {
+  if (!displayReady) {
+    return;
+  }
+  uint32_t pwmInFreq = 0, pwmInDuty = 0;
+  if (pwmInReady) {
+    getPwm(0, pwmInFreq, pwmInDuty);
+  }
+  int pwmInDutyPct = (int)((pwmInDuty * 100ULL + 2047) / 4095);
+  int pwmOutDutyPct = (int)((pwmOutDuty * 100ULL + 2047) / 4095);
+  int in1 = getDigitalInput(0) ? 1 : 0;
+  int in2 = getDigitalInput(1) ? 1 : 0;
+  int out1 = digitalRead(GPIO_OUT1) ? 1 : 0;
+  int out2 = digitalRead(GPIO_OUT2) ? 1 : 0;
+  int a1 = getAdc(0);
+  int a2 = getAdc(1);
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tf);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "inp1:%d    inp2:%d", in1, in2);
+  u8g2.drawStr(0, 8, buf);
+  snprintf(buf, sizeof(buf), "adc1:%4d adc2:%4d", a1, a2);
+  u8g2.drawStr(0, 20, buf);
+  snprintf(buf, sizeof(buf), "pwmi1:%luHz %d%%", (unsigned long)pwmInFreq, pwmInDutyPct);
+  u8g2.drawStr(0, 32, buf);
+  snprintf(buf, sizeof(buf), "out1:%d    out2:%d", out1, out2);
+  u8g2.drawStr(0, 44, buf);
+  snprintf(buf, sizeof(buf), "dac1:%3d  dac2:%3d", dacVals[0], dacVals[1]);
+  u8g2.drawStr(0, 56, buf);
+  snprintf(buf, sizeof(buf), "pwmo1:%luHz %d%%", (unsigned long)pwmOutFreq, pwmOutDutyPct);
+  u8g2.drawStr(0, 64, buf);
+  u8g2.sendBuffer();
+}
+//------------------------------------------------------------------------------
+// command parser
+//------------------------------------------------------------------------------
 void processCmd() {
 /*
   Command parser
@@ -492,7 +600,9 @@ void processCmd() {
       isError = ledcChangeFrequency(PWMO1_PIN, frequency, PWMO1_RSL) == 0;
     }
     if (!isError) {
-      ledcWrite(PWMO1_PIN, value);                    // set duty cycle
+      ledcWrite(PWMO1_PIN, value);
+      pwmOutFreq = frequency;
+      pwmOutDuty = value;
     }
   } else if (IS_CMD("dac")) {
     // channel, value
@@ -562,6 +672,8 @@ void processCmd() {
               ledcChangeFrequency(PWMO1_PIN, 1000, PWMO1_RSL) == 0;
     if (!isError) {
       ledcWrite(PWMO1_PIN, d);
+      pwmOutFreq = 1000;
+      pwmOutDuty = d;
       uint32_t freq, duty;
       getPwm(0, freq, duty);
       pSrl->printf(":%u %u %u\n", freq, duty, d);
@@ -574,6 +686,8 @@ void processCmd() {
     pSrl->print("\nError: cmd parse");
   }
 }
+//------------------------------------------------------------------------------
+// arduino setup and loop
 //------------------------------------------------------------------------------
 void setup() {
 #if CFG_DBG == TRUE
@@ -590,9 +704,16 @@ void setup() {
   initDac();
   initPwmIn();
   initPwmOut();
+  initDisplay();
 }
-
+//------------------------------------------------------------------------------
 void loop() {
+  static uint32_t lastOledUpdate = 0;
+  if (millis() - lastOledUpdate >= OLED_UPDATE_MS) {
+    lastOledUpdate = millis();
+    updateDisplay();
+  }
+
   if (lcls.srlRxBfr.isFull()) {
     int discarded = pSrl->read();
     if (discarded == '\n') {
@@ -618,3 +739,4 @@ void loop() {
     lcls.srlRxBfr.put(inByte);
   }
 }
+//------------------------------------------------------------------------------

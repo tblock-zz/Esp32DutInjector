@@ -15,6 +15,7 @@ input over a simple line-based ASCII command interface on the serial port
 - 1 PWM output (GPIO 16, LEDC, 12 bit resolution)
 - 1 PWM measurement input (GPIO 22, MCPWM capture, both edges,
   frequency + duty cycle measurement)
+- OLED status display (SSD1306 128x64, I2C) showing all I/O states
 - Self-test command `t` for a quick PWM loop check (e.g. with the PWM output
   wired to the PWM input)
 
@@ -47,6 +48,30 @@ Note: `duty`/`freq` return `0` while no complete period has been captured yet
 or when the signal has disappeared (no rising edge for more than
 max(2 periods, 100 ms)) — e.g. with a DC level at 0 %/100 % duty.
 
+## OLED status display
+
+An SSD1306 128x64 OLED (I2C, address `0x3C`) shows all I/O states, refreshed
+every 200 ms:
+
+```
+inp1:0    inp2:1
+adc1:1234 adc2:2345
+pwmi1:12345Hz  50%
+out1:1    out2:0
+dac1:128  dac2:255
+pwmo1:1000Hz   25%
+```
+
+- `inp1`/`inp2`/`out1`/`out2`: digital state (0/1)
+- `adc1`/`adc2`: raw 12-bit ADC values
+- `pwmi1`: measured frequency (Hz) and duty cycle (%)
+- `dac1`/`dac2`: set DAC values (0..255)
+- `pwmo1`: set PWM frequency (Hz) and duty cycle (%)
+
+Requires the **U8g2** library (`arduino-cli lib install "U8g2"`). If the
+display is not found on the I2C bus, the firmware runs without it (status is
+reported on the serial port at startup).
+
 ## Pin mapping
 
 | Function      | GPIO |
@@ -61,6 +86,8 @@ max(2 periods, 100 ms)) — e.g. with a DC level at 0 %/100 % duty.
 | DAC out 1     | 25   |
 | DAC out 2     | 26   |
 | PWM out       | 16   |
+| OLED SDA      | 21   |
+| OLED SCL      | 19   |
 
 ## Building and flashing
 
