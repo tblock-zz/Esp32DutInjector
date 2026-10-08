@@ -544,15 +544,15 @@ void updateDisplay() {
   char buf[32];
   snprintf(buf, sizeof(buf), "inp1:%d    inp2:%d", in1, in2);
   u8g2.drawStr(0, 8, buf);
-  snprintf(buf, sizeof(buf), "adc1:%4d adc2:%4d", a1, a2);
-  u8g2.drawStr(0, 20, buf);
-  snprintf(buf, sizeof(buf), "pwmi1:%luHz %d%%", (unsigned long)pwmInFreq, pwmInDutyPct);
-  u8g2.drawStr(0, 32, buf);
   snprintf(buf, sizeof(buf), "out1:%d    out2:%d", out1, out2);
+  u8g2.drawStr(0, 20, buf);
+  snprintf(buf, sizeof(buf), "adc1:%4d adc2:%4d", a1, a2);
+  u8g2.drawStr(0, 32, buf);
+  snprintf(buf, sizeof(buf), "dac1:%4d dac2:%4d", dacVals[0], dacVals[1]);
   u8g2.drawStr(0, 44, buf);
-  snprintf(buf, sizeof(buf), "dac1:%3d  dac2:%3d", dacVals[0], dacVals[1]);
-  u8g2.drawStr(0, 56, buf);
-  snprintf(buf, sizeof(buf), "pwmo1:%luHz %d%%", (unsigned long)pwmOutFreq, pwmOutDutyPct);
+  snprintf(buf, sizeof(buf), "pwmi1:%7luHz %3d%%", (unsigned long)pwmInFreq, pwmInDutyPct);
+  u8g2.drawStr(0, 54, buf);
+  snprintf(buf, sizeof(buf), "pwmo1:%7luHz %3d%%", (unsigned long)pwmOutFreq, pwmOutDutyPct);
   u8g2.drawStr(0, 64, buf);
   u8g2.sendBuffer();
 }

@@ -55,11 +55,11 @@ every 200 ms:
 
 ```
 inp1:0    inp2:1
-adc1:1234 adc2:2345
-pwmi1:12345Hz  50%
 out1:1    out2:0
-dac1:128  dac2:255
-pwmo1:1000Hz   25%
+adc1:1234 adc2:2345
+dac1: 128 dac2: 255
+pwmi1:   1000Hz  25%
+pwmo1:   1000Hz  25%
 ```
 
 - `inp1`/`inp2`/`out1`/`out2`: digital state (0/1)
