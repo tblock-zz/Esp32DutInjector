@@ -84,6 +84,8 @@ reported on the serial port at startup).
 
 ## Rotary encoder menu
 
+![ESP32 with OLED display and rotary encoder](docs/Esp32OledEncoder.jpg)
+
 A rotary encoder with push button (see pin mapping) controls the outputs
 directly on the device. The button is debounced (30 ms) and active high.
 
