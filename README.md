@@ -10,15 +10,15 @@ display.
 
 ## Features
 
-- 2 digital inputs (GPIO 15, GPIO 2)
-- 2 digital outputs (GPIO 17, GPIO 18)
-- 2 ADC inputs (GPIO 32, GPIO 33, 12 bit, 0..4095)
-- 2 DAC outputs (GPIO 25, GPIO 26, 8 bit, 0..255)
-- 1 PWM output (GPIO 14, LEDC, 12 bit resolution)
-- 1 PWM measurement input (GPIO 27, MCPWM capture, both edges,
+- 2 digital inputs
+- 2 digital outputs
+- 2 ADC inputs (12 bit, 0..4095)
+- 2 DAC outputs (8 bit, 0..255)
+- 1 PWM output (LEDC, 12 bit resolution)
+- 1 PWM measurement input (MCPWM capture, both edges,
   frequency + duty cycle measurement)
 - OLED status display (SSD1306 128x64, I2C) showing all I/O states
-- Rotary encoder menu (GPIO 13/16/4) to select and edit outputs directly on
+- Rotary encoder menu to select and edit outputs directly on
   the device
 - Self-test command `t` for a quick PWM loop check (e.g. with the PWM output
   wired to the PWM input)
@@ -84,9 +84,8 @@ reported on the serial port at startup).
 
 ## Rotary encoder menu
 
-A rotary encoder with push button (CLK = GPIO 13, DT = GPIO 16,
-button = GPIO 4) controls the outputs directly on the device. The button is
-debounced (30 ms) and active high.
+A rotary encoder with push button (see pin mapping) controls the outputs
+directly on the device. The button is debounced (30 ms) and active high.
 
 | Action            | Effect                                                          |
 | ----------------- | --------------------------------------------------------------- |
@@ -135,7 +134,8 @@ arduino-cli upload --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 .
 
 `CFG_DBG` (top of `Esp32DutInjector.ino`) selects the debug output port:
 when `TRUE`, the command interface and debug output use `Serial` (USB /
-UART0); when `FALSE`, `Serial2` on GPIO 23 (RX) / 24 (TX) is used.
+UART0); when `FALSE`, `Serial2` on the pins defined by `PIN_SRL_RX` and
+`PIN_SRL_TX` is used.
 
 ## License
 
