@@ -52,44 +52,45 @@ PORT to arduino-esp32 Core 3.3.x (IDF 5.x)
 #define CFG_DBG        TRUE
 
 // define the PIN number you want to use
-#define GPIO_INP1      36
-#define GPIO_INP2      39
+#define GPIO_INP1      15
+#define GPIO_INP2       2
 
-#define PIN_ADC1       34
-#define PIN_ADC2       35
+#define PIN_ADC1       32
+#define PIN_ADC2       33
 
-#define PWMI1_PIN      22
+#define PWMI1_PIN      27
 
-#define GPIO_OUT1      14
-#define GPIO_OUT2      27
+#define GPIO_OUT1      17
+#define GPIO_OUT2      18
 
 #define PIN_DAC1       25
 #define PIN_DAC2       26
 
-#define PWMO1_PIN      16
-#define PWMO1_FRQ      5000
+#define PWMO1_PIN      14
+#define PWMO1_FRQ      1000
 #define PWMO1_RSL      12
 
-#define PIN_SRL_RX     23
-#define PIN_SRL_TX     24
+#define PIN_SRL_RX     RX0
+#define PIN_SRL_TX     TX0
 
 #define SZ_RX_BUFFER   100
 #define BAUD_RATE      115200
 
 // OLED display (SH1106 128x64, I2C)
 #define PIN_OLED_SDA   21
-#define PIN_OLED_SCL   19
+#define PIN_OLED_SCL   23
 #define OLED_UPDATE_MS 200
+
+// rotary encoder with push button (menu)
+#define ENC_CLK_PIN    13
+#define ENC_DT_PIN     16
+#define ENC_BTN_PIN     4
+
+constexpr long kPwmFreqStep = 10L;
+constexpr long kPwmDutyStep = 20L;
+constexpr long kDacStep     = 1L;
 //------------------------------------------------------------------------------
 HardwareSerial* pSrl       = &Serial2;
-static bool pwmOutReady    = false;
-static bool pwmInReady     = false;
-// tracked output values (not readable back from hardware)
-static int      dacVals[2] = {0, 0};
-static uint32_t pwmOutFreq = PWMO1_FRQ;
-static uint32_t pwmOutDuty = 0;
-// OLED
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
 //------------------------------------------------------------------------------
 // command buffer
 //------------------------------------------------------------------------------
@@ -143,16 +144,26 @@ typedef struct {
   volatile uint32_t lastRiseTick; // tick count of last rising edge (staleness check)
   volatile bool hasRisingCapture;
   volatile bool hasPeriod;        // period valid (2nd rising edge seen)
+  bool          ready;
 } typePwm;
+
+typedef struct {
+  bool     ready;
+  uint32_t freq;
+  uint32_t duty;
+} typePwmOut;
 //------------------------------------------------------------------------------
 // structure that holds module wide variables
 typedef struct sLocals {
   volatile typePwm pwmIn;
+  volatile typePwmOut pwmOut;
+  // tracked output values (not readable back from hardware)
+  int      dacVals[2]  = {0, 0};
   // +1 for c-string end sign '\0'
   CircularBuffer<SZ_RX_BUFFER + 1> srlRxBfr;
 } typeLocals;
 //------------------------------------------------------------------------------
-typeLocals lcls = {};
+typeLocals lcls = {{0}, {false, PWMO1_FRQ, 0}, {0, 0}, CircularBuffer<SZ_RX_BUFFER + 1>()};
 //------------------------------------------------------------------------------
 // digital input handling
 //------------------------------------------------------------------------------
@@ -194,6 +205,24 @@ void initDigitalOut() {
 #endif
 }
 //------------------------------------------------------------------------------
+bool getDigitalOutput(int nr) {
+  switch (nr) {
+#ifdef GPIO_OUT1
+    case 0:
+      nr = GPIO_OUT1;
+      break;
+#endif
+#ifdef GPIO_OUT2
+    case 1:
+      nr = GPIO_OUT2;
+      break;
+#endif
+    default:
+      return false;
+  }
+  return digitalRead(nr);
+}
+//------------------------------------------------------------------------------
 void setDigitalOutput(int nr, int val) {
   val = val != 0 ? HIGH : LOW;
   switch (nr) {
@@ -230,7 +259,7 @@ void setDac(int nr, int val) {
     val = 0;
   }
   if (nr >= 0 && nr < 2) {
-    dacVals[nr] = val;
+    lcls.dacVals[nr] = val;
   }
   switch (nr) {
 #ifdef PIN_DAC1
@@ -275,13 +304,13 @@ int getAdc(int nr) {
 //------------------------------------------------------------------------------
 void initPwmOut() {
 #ifdef PWMO1_PIN
-  pwmOutReady = ledcAttach(PWMO1_PIN, PWMO1_FRQ, PWMO1_RSL);
+  lcls.pwmOut.ready = ledcAttach(PWMO1_PIN, PWMO1_FRQ, PWMO1_RSL);
 #endif
 }
 
 void setPwm(int nr, int val) {
 #if defined(PWMO1_PIN)
-  if (pwmOutReady && nr == 0 && val >= 0 && val <= 4095) {
+  if (lcls.pwmOut.ready && nr == 0 && val >= 0 && val <= 4095) {
     ledcWrite(PWMO1_PIN, val);
   }
 #endif
@@ -405,18 +434,18 @@ void initPwmIn() {
     }
     return;
   }
-  pwmInReady = true;
+  lcls.pwmIn.ready = true;
 }
 //------------------------------------------------------------------------------
 bool getPwmReady() {
-  return pwmInReady;
+  return lcls.pwmIn.ready;
 }
 //------------------------------------------------------------------------------
 void getPwm(int nr, uint32_t& freq, uint32_t& duty) {
   (void)nr;  // single input channel
   freq = 0;
   duty = 0;
-  if (!pwmInReady) {
+  if (!lcls.pwmIn.ready) {
     return;
   }
   // coherent snapshot: copy the ISR-written values with interrupts disabled
@@ -473,9 +502,190 @@ void getPwm(int nr, uint32_t& freq, uint32_t& duty) {
   freq = (1000000ULL + periodTicks / 2) / periodTicks;
 }
 //------------------------------------------------------------------------------
+// menu (encoder + button)
+//------------------------------------------------------------------------------
+enum MenuState { ST_SELECT, ST_EDIT_DAC, ST_EDIT_FREQ, ST_EDIT_DUTY };
+
+static MenuState menuState = ST_SELECT;
+static int       menuSel   = 0;
+static bool      menuDirty = false;
+static int       encAccum  = 0;
+
+constexpr int      kMenuItemCount    = 5;
+constexpr int      kLastDioItem      = 1;
+constexpr int      kFirstDacItem     = 2;
+constexpr int      kLastDacItem      = 3;
+constexpr int      kSelectThreshold  = 5;
+constexpr int      kDefaultThreshold = 1;
+constexpr int      kMaxStepsPerLoop  = 5;
+constexpr uint32_t kBtnDebounceMs    = 30;
+
+static bool btnPressed() {
+  static uint32_t lastChangeMs = 0;
+  static int      lastRaw      = LOW;
+  static bool     debounced    = false;
+  static bool     wasPressed   = false;
+
+  int raw = digitalRead(ENC_BTN_PIN);
+  if (raw != lastRaw) {
+    lastChangeMs = millis();
+    lastRaw = raw;
+  }
+  if (millis() - lastChangeMs < kBtnDebounceMs) {
+    return false;
+  }
+  debounced = (raw == HIGH);
+  bool pressed = debounced && !wasPressed;
+  wasPressed = debounced;
+  return pressed;
+}
+
+// encoder (updated in ISR)
+static volatile int encDelta = 0;
+static uint8_t encPrevAB = 0;
+
+void IRAM_ATTR encIsr() {
+  uint8_t ab = (uint8_t)((digitalRead(ENC_CLK_PIN) & 1) << 1) | (uint8_t)(digitalRead(ENC_DT_PIN) & 1);
+  uint8_t idx = (uint8_t)((encPrevAB << 2) | ab);
+  if (idx == 1 || idx == 7 || idx == 8 || idx == 14) {
+    encDelta--;
+  } else if (idx == 2 || idx == 4 || idx == 11 || idx == 13) {
+    encDelta++;
+  }
+  encPrevAB = ab;
+}
+
+static int takeEncoderDelta() {
+  noInterrupts();
+  int delta = encDelta;
+  encDelta = 0;
+  interrupts();
+  return delta;
+}
+
+static int encoderThreshold() {
+  switch (menuState) {
+    case ST_SELECT: return kSelectThreshold;
+    default:        return kDefaultThreshold;
+  }
+}
+
+static int consumeEncoderSteps() {
+  encAccum += takeEncoderDelta();
+  int threshold = encoderThreshold();
+  int steps = 0;
+  while (encAccum >= threshold) {
+    steps++;
+    encAccum -= threshold;
+  }
+  while (encAccum <= -threshold) {
+    steps--;
+    encAccum += threshold;
+  }
+  return steps;
+}
+
+static void resetEncoderSteps() {
+  encAccum = 0;
+}
+
+static void toggleSelectedDio() {
+  setDigitalOutput(menuSel, getDigitalOutput(menuSel) ? 0 : 1);
+}
+
+static void enterEditMode() {
+  if (menuSel <= kLastDacItem) {
+    menuState = ST_EDIT_DAC;
+  } else {
+    menuState = ST_EDIT_FREQ;
+  }
+}
+
+static void onButtonPressed() {
+  menuDirty = true;
+  resetEncoderSteps();
+  switch (menuState) {
+    case ST_SELECT:
+      if (menuSel <= kLastDioItem) {
+        toggleSelectedDio();
+      } else {
+        enterEditMode();
+      }
+      break;
+    case ST_EDIT_DAC:
+      menuState = ST_SELECT;
+      break;
+    case ST_EDIT_FREQ:
+      menuState = ST_EDIT_DUTY;
+      break;
+    case ST_EDIT_DUTY:
+      menuState = ST_SELECT;
+      break;
+  }
+}
+
+static void selectAdjacentItem(int dir) {
+  menuSel = (menuSel + dir + kMenuItemCount) % kMenuItemCount;
+}
+
+static void adjustDac(int dir) {
+  int channel = menuSel - kFirstDacItem;
+  setDac(channel, lcls.dacVals[channel] + dir * kDacStep);
+}
+
+static void adjustPwmFreq(int dir) {
+  long freq = (long)lcls.pwmOut.freq + dir * kPwmFreqStep;
+  if (freq < 1) freq = 1;
+  if (freq > 1000000L) freq = 1000000L;
+  if (lcls.pwmOut.ready && ledcChangeFrequency(PWMO1_PIN, (uint32_t)freq, PWMO1_RSL) != 0) {
+    lcls.pwmOut.freq = (uint32_t)freq;
+  }
+}
+
+static void adjustPwmDuty(int dir) {
+  long duty = (long)lcls.pwmOut.duty + dir * kPwmDutyStep;
+  if (duty <    0) duty =    0;
+  if (duty > 4095) duty = 4095;
+  if (lcls.pwmOut.ready) {
+    ledcWrite(PWMO1_PIN, (uint32_t)duty);
+    lcls.pwmOut.duty = (uint32_t)duty;
+  }
+}
+
+static void applyStep(int dir) {
+  switch (menuState) {
+    case ST_SELECT:    selectAdjacentItem(dir); break;
+    case ST_EDIT_DAC:  adjustDac(dir);          break;
+    case ST_EDIT_FREQ: adjustPwmFreq(dir);      break;
+    case ST_EDIT_DUTY: adjustPwmDuty(dir);      break;
+  }
+}
+
+void handleMenu() {
+  if (btnPressed()) {
+    onButtonPressed();
+  }
+
+  int steps = consumeEncoderSteps();
+  if (steps == 0) {
+    return;
+  }
+  menuDirty = true;
+  int dir   = (steps > 0) ? 1 : -1;
+  int count = (steps > 0) ? steps : -steps;
+  if (count > kMaxStepsPerLoop) {
+    count = kMaxStepsPerLoop;
+  }
+  for (int i = 0; i < count; i++) {
+    applyStep(dir);
+  }
+}
+//------------------------------------------------------------------------------
 // OLED display
 //------------------------------------------------------------------------------
 static bool displayReady = false;
+
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
 
 void initDisplay() {
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
@@ -522,20 +732,38 @@ void initDisplay() {
   pSrl->println("  display init OK");
 }
 //------------------------------------------------------------------------------
+static void drawItem(int x, int y, const char* s, bool selected, bool editing) {
+  if (editing) {
+    int w = u8g2.getStrWidth(s);
+    u8g2.setDrawColor(1);
+    u8g2.drawBox(x, y - 8, w + 2, 10);
+    u8g2.setDrawColor(0);
+    u8g2.drawStr(x, y, s);
+    u8g2.setDrawColor(1);
+  } else {
+    u8g2.drawStr(x, y, s);
+    if (selected) {
+      int uy = y + 2;
+      if (uy > 63) uy = 63;
+      u8g2.drawHLine(x, uy, u8g2.getStrWidth(s));
+    }
+  }
+}
+
 void updateDisplay() {
   if (!displayReady) {
     return;
   }
   uint32_t pwmInFreq = 0, pwmInDuty = 0;
-  if (pwmInReady) {
+  if (lcls.pwmIn.ready) {
     getPwm(0, pwmInFreq, pwmInDuty);
   }
   int pwmInDutyPct = (int)((pwmInDuty * 100ULL + 2047) / 4095);
-  int pwmOutDutyPct = (int)((pwmOutDuty * 100ULL + 2047) / 4095);
+  int pwmOutDutyPct = (int)((lcls.pwmOut.duty * 100ULL + 2047) / 4095);
   int in1 = getDigitalInput(0) ? 1 : 0;
   int in2 = getDigitalInput(1) ? 1 : 0;
-  int out1 = digitalRead(GPIO_OUT1) ? 1 : 0;
-  int out2 = digitalRead(GPIO_OUT2) ? 1 : 0;
+  int out1 = getDigitalOutput(0) ? 1 : 0;
+  int out2 = getDigitalOutput(1) ? 1 : 0;
   int a1 = getAdc(0);
   int a2 = getAdc(1);
 
@@ -544,16 +772,23 @@ void updateDisplay() {
   char buf[32];
   snprintf(buf, sizeof(buf), "inp1:%d    inp2:%d", in1, in2);
   u8g2.drawStr(0, 8, buf);
-  snprintf(buf, sizeof(buf), "out1:%d    out2:%d", out1, out2);
-  u8g2.drawStr(0, 20, buf);
+  snprintf(buf, sizeof(buf), "out1:%d", out1);
+  drawItem(0, 20, buf, menuSel == 0, false);
+  snprintf(buf, sizeof(buf), "out2:%d", out2);
+  drawItem(60, 20, buf, menuSel == 1, false);
   snprintf(buf, sizeof(buf), "adc1:%4d adc2:%4d", a1, a2);
   u8g2.drawStr(0, 32, buf);
-  snprintf(buf, sizeof(buf), "dac1:%4d dac2:%4d", dacVals[0], dacVals[1]);
-  u8g2.drawStr(0, 44, buf);
+  snprintf(buf, sizeof(buf), "dac1:%4d", lcls.dacVals[0]);
+  drawItem(0, 44, buf, menuSel == 2, menuState == ST_EDIT_DAC && menuSel == 2);
+  snprintf(buf, sizeof(buf), "dac2:%4d", lcls.dacVals[1]);
+  drawItem(60, 44, buf, menuSel == 3, menuState == ST_EDIT_DAC && menuSel == 3);
   snprintf(buf, sizeof(buf), "pwmi1:%7luHz %3d%%", (unsigned long)pwmInFreq, pwmInDutyPct);
   u8g2.drawStr(0, 54, buf);
-  snprintf(buf, sizeof(buf), "pwmo1:%7luHz %3d%%", (unsigned long)pwmOutFreq, pwmOutDutyPct);
-  u8g2.drawStr(0, 64, buf);
+  snprintf(buf, sizeof(buf), "pwmo1:%7luHz", (unsigned long)lcls.pwmOut.freq);
+  drawItem(0, 64, buf, menuSel == 4 && menuState != ST_EDIT_DUTY, menuState == ST_EDIT_FREQ);
+  int x = u8g2.getStrWidth(buf);
+  snprintf(buf, sizeof(buf), " %3d%%", pwmOutDutyPct);
+  drawItem(x, 64, buf, menuSel == 4 && menuState != ST_EDIT_FREQ, menuState == ST_EDIT_DUTY);
   u8g2.sendBuffer();
 }
 //------------------------------------------------------------------------------
@@ -595,14 +830,14 @@ void processCmd() {
            &channel, &frequency, &value, &extra);
     isError = (nel != 3) || (channel != 0) || (frequency < 1) ||
               (frequency > 1000000) || (value < 0) || (value > 4095) ||
-              !pwmOutReady;
+              !lcls.pwmOut.ready;
     if (!isError) {
       isError = ledcChangeFrequency(PWMO1_PIN, frequency, PWMO1_RSL) == 0;
     }
     if (!isError) {
       ledcWrite(PWMO1_PIN, value);
-      pwmOutFreq = frequency;
-      pwmOutDuty = value;
+      lcls.pwmOut.freq = frequency;
+      lcls.pwmOut.duty = value;
     }
   } else if (IS_CMD("dac")) {
     // channel, value
@@ -621,7 +856,7 @@ void processCmd() {
   } else if (IS_CMD("duty")) {
     // channel
     nel = sscanf((const char*)&flatBuffer[idx], "%d %c", &nr, &extra);
-    isError = (nel != 1) || (nr < 0) || (nr > 0) || !pwmInReady;
+    isError = (nel != 1) || (nr < 0) || (nr > 0) || !lcls.pwmIn.ready;
     if (!isError) {
       uint32_t freq, duty;
       getPwm(nr, freq, duty);
@@ -632,7 +867,7 @@ void processCmd() {
   } else if (IS_CMD("freq")) {
     // channel
     nel = sscanf((const char*)&flatBuffer[idx], "%d %c", &nr, &extra);
-    isError = (nel != 1) || (nr < 0) || (nr > 0) || !pwmInReady;
+    isError = (nel != 1) || (nr < 0) || (nr > 0) || !lcls.pwmIn.ready;
     if (!isError) {
       uint32_t freq, duty;
       getPwm(nr, freq, duty);
@@ -668,12 +903,12 @@ void processCmd() {
     else {
       d = DUTY;
     }
-    isError = !pwmOutReady ||
+    isError = !lcls.pwmOut.ready ||
               ledcChangeFrequency(PWMO1_PIN, 1000, PWMO1_RSL) == 0;
     if (!isError) {
       ledcWrite(PWMO1_PIN, d);
-      pwmOutFreq = 1000;
-      pwmOutDuty = d;
+      lcls.pwmOut.freq = 1000;
+      lcls.pwmOut.duty = d;
       uint32_t freq, duty;
       getPwm(0, freq, duty);
       pSrl->printf(":%u %u %u\n", freq, duty, d);
@@ -704,13 +939,23 @@ void setup() {
   initDac();
   initPwmIn();
   initPwmOut();
+  pinMode(ENC_CLK_PIN, INPUT_PULLUP);
+  pinMode(ENC_DT_PIN, INPUT_PULLUP);
+  pinMode(ENC_BTN_PIN, INPUT_PULLDOWN);
+  encPrevAB = (uint8_t)((digitalRead(ENC_CLK_PIN) & 1) << 1) | (uint8_t)(digitalRead(ENC_DT_PIN) & 1);
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encIsr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_DT_PIN), encIsr, CHANGE);
   initDisplay();
 }
 //------------------------------------------------------------------------------
 void loop() {
+  handleMenu();
   static uint32_t lastOledUpdate = 0;
-  if (millis() - lastOledUpdate >= OLED_UPDATE_MS) {
-    lastOledUpdate = millis();
+  uint32_t nowMs = millis();
+  uint32_t interval = menuDirty ? 50 : OLED_UPDATE_MS;
+  if (nowMs - lastOledUpdate >= interval) {
+    lastOledUpdate = nowMs;
+    menuDirty = false;
     updateDisplay();
   }
 
